@@ -1,6 +1,6 @@
 <?php
 
-namespace ScrapyardIO\Tubes\Contracts\Framebuffers;
+namespace Surface\Contracts\Framebuffers;
 
 /**
  * The smallest region a surface can usefully transmit.

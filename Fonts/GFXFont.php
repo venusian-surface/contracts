@@ -1,284 +1,166 @@
 <?php
 
-namespace ScrapyardIO\Tubes\Contracts\Fonts;
+namespace Surface\Contracts\Fonts;
 
 /**
- * Renderer-agnostic glyph data model.
- *
- * Fonts carry no drawing logic — each renderer decodes glyphs into its own
- * drawPixel calls — so the same font classes serve every GFX driver
- * (software phpdafruit, SDL3, …).
+ * A bitmap face: the glyph table and its bytes, no drawing. Adafruit GFX 1bpp
+ * row-major, LVGL 1bpp / 4bpp with a reserved glyph 0, or the classic 5x7
+ * column-major table. A subclass sets properties; the readers resolve the
+ * encoding once and cache it. Readers never throw: an unknown code is null,
+ * a byte past the table is 0.
  */
 abstract class GFXFont
 {
-    protected array $bitmaps = [];
-    protected array $glyphs = [];
-    protected int $first = 32;   // First character (usually space)
-    protected int $last = 126;   // Last character (usually tilde)
-    protected int $yAdvance = 1; // Line height
-    protected bool $isColumnMajor = false;  // Classic font uses column-major, custom fonts use row-major
-    protected int $bitsPerPixel = 1; // 1 = standard 1bpp, 4 = anti-aliased 4bpp (LVGL)
-    protected string $fontEncoding = 'auto'; // auto | adafruit | lvgl
-    protected string $yOffsetMode = 'auto'; // auto | raw | lvgl_line
-    protected int $alphaThreshold = 8; // only used for 4bpp fonts
-    protected ?string $resolvedFontEncoding = null;
-    protected ?string $resolvedYOffsetMode = null;
-    protected ?int $capHeight = null;
+    protected int $first = 0x20;
 
-    public function getFirst(): int
+    protected int $last = 0x7E;
+
+    /** Line height. */
+    protected int $y_advance = 8;
+
+    /** Classic 5x7: five column bytes per code, no glyph table. */
+    protected bool $column_major = false;
+
+    /** 1 = bits, 4 = anti-aliased nibbles (LVGL). */
+    protected int $bits_per_pixel = 1;
+
+    /** null detects from the glyph table. */
+    protected ?FontEncoding $encoding = null;
+
+    /** null detects from the offsets. */
+    protected ?YOffsetMode $y_offset_mode = null;
+
+    /** A 4bpp nibble at or above this is ink; 0..15. */
+    protected int $alpha_threshold = 8;
+
+    /** @var list<int> */
+    protected array $bitmaps = [];
+
+    /** @var list<array{int, int, int, int, int, int}> [bitmap_offset, width, height, x_advance, x_offset, y_offset] */
+    protected array $glyphs = [];
+
+    private ?FontEncoding $resolved_encoding = null;
+
+    private ?YOffsetMode $resolved_y_offset_mode = null;
+
+    private ?int $cap_height = null;
+
+    public function first(): int
     {
         return $this->first;
     }
 
-    public function getLast(): int
+    public function last(): int
     {
         return $this->last;
     }
 
-    public function getYAdvance(): int
+    public function lineHeight(): int
     {
-        return $this->yAdvance;
+        return $this->y_advance;
     }
 
     public function isColumnMajor(): bool
     {
-        return $this->isColumnMajor;
+        return $this->column_major;
     }
 
-    public function getBitsPerPixel(): int
+    public function bitsPerPixel(): int
     {
-        return $this->bitsPerPixel;
+        return $this->bits_per_pixel;
     }
 
-    public function getFontEncoding(): string
+    public function alphaThreshold(): int
     {
-        return $this->resolveFontEncoding();
+        return $this->alpha_threshold;
     }
 
-    public function getAlphaThreshold(): int
+    public function encoding(): FontEncoding
     {
-        return $this->alphaThreshold;
+        return $this->resolved_encoding ??= $this->encoding ?? $this->detectEncoding();
     }
 
-    public function getYOffsetMode(): string
+    public function yOffsetMode(): YOffsetMode
     {
-        return $this->resolveYOffsetMode();
+        return $this->resolved_y_offset_mode ??= $this->y_offset_mode ?? $this->detectYOffsetMode();
     }
 
-    public function getCapHeight(): int
+    /** Tallest of A..Z; the line height for a face without capitals. */
+    public function capHeight(): int
     {
-        if (! is_null($this->capHeight)) {
-            return $this->capHeight;
+        if (! is_null($this->cap_height)) {
+            return $this->cap_height;
         }
-
-        $maxHeight = 0;
-        $start = max($this->first, 65); // 'A'
-        $end = min($this->last, 90);    // 'Z'
-
-        for ($c = $start; $c <= $end; $c++) {
-            $glyph = $this->getGlyphInfo($c);
-            if (($glyph['valid'] ?? 0) === 1) {
-                $h = (int) ($glyph['height'] ?? 0);
-                if ($h > $maxHeight) {
-                    $maxHeight = $h;
-                }
+        $max = 0;
+        for ($code = max($this->first, 0x41); $code <= min($this->last, 0x5A); $code++) {
+            $glyph = $this->glyph($code);
+            if (! is_null($glyph) && $glyph->height > $max) {
+                $max = $glyph->height;
             }
         }
 
-        // Fallback for symbol-only fonts.
-        if ($maxHeight <= 0) {
-            $maxHeight = (int) $this->yAdvance;
-        }
-
-        $this->capHeight = $maxHeight;
-
-        return $this->capHeight;
+        return $this->cap_height = $max > 0 ? $max : $this->y_advance;
     }
 
-    public function getByte(int $offset): int
-    {
-        return $this->bitmaps[$offset] ?? 0;
-    }
-
-    /**
-     * Whether this font carries drawable bitmap/glyph payload.
-     *
-     * Empty U8g2 stubs and make:font scaffolding return false so callers
-     * can skip them instead of synthesizing classic offsets into a void table.
-     */
+    /** Whether the face carries drawable bytes — an empty scaffold does not. */
     public function hasBitmapData(): bool
     {
         return $this->bitmaps !== [];
     }
 
-    public function getBitmapByte(int $offset): int
+    public function byte(int $offset): int
     {
-        return $this->getByte($offset);
+        return $this->bitmaps[$offset] ?? 0;
     }
 
-    public function getGlyph(int $char_code): array
+    /** Null outside first..last or when nothing describes the code. */
+    public function glyph(int $code): ?Glyph
     {
-        // For fonts with glyphs array, return the metadata
-        // Format: [bitmapOffset, width, height, xAdvance, xOffset, yOffset]
-        if (isset($this->glyphs[$char_code])) {
-            return $this->glyphs[$char_code];
+        if ($code < $this->first || $code > $this->last) {
+            return null;
+        }
+        $index = $code - $this->first + ($this->encoding() === FontEncoding::LVGL ? 1 : 0);
+        if (isset($this->glyphs[$index])) {
+            [$offset, $width, $height, $x_advance, $x_offset, $y_offset] = $this->glyphs[$index];
+
+            return new Glyph($offset, $width, $height, $x_advance, $x_offset, $y_offset);
+        }
+        if ($this->column_major && $this->bitmaps !== []) {
+            return new Glyph($code * 5, 5, 8, 6, 0, 0);
         }
 
-        // Return empty glyph if not found
-        return [0, 0, 0, 0, 0, 0];
+        return null;
     }
 
-    /**
-     * Get glyph information for a character with validation
-     * Returns array with: [bitmapOffset, width, height, xAdvance, xOffset, yOffset, valid]
-     *
-     * @param int $character The character code to get info for
-     * @return array Glyph info array with valid flag (1 if valid, 0 if not)
-     */
-    public function getGlyphInfo(int $character): array
+    /** LVGL conversions carry an all-zero glyph 0 and then one entry per code. */
+    private function detectEncoding(): FontEncoding
     {
-        // Check if character is within font range
-        if ($character < $this->first || $character > $this->last) {
-            // Return invalid glyph info
-            return [0, 0, 0, 0, 0, 0, 0];
-        }
+        $range = $this->last - $this->first + 1;
 
-        // Adjust character to array index (subtract first char)
-        $adjusted_char = $character - $this->first;
-
-        // LVGL converted fonts in this project include an explicit reserved glyph at index 0.
-        if ($this->resolveFontEncoding() === 'lvgl') {
-            $adjusted_char += 1;
-        }
-
-        // For fonts with glyphs array (custom fonts)
-        if (isset($this->glyphs[$adjusted_char])) {
-            $glyph = $this->glyphs[$adjusted_char];
-
-            // Return glyph info with valid flag
-            // Format: [bitmapOffset, width, height, xAdvance, xOffset, yOffset, valid]
-            return [
-                "bitmapOffset" => $glyph[0],
-                "width" => $glyph[1],
-                "height" => $glyph[2],
-                "xAdvance" => $glyph[3],
-                "xOffset" => $glyph[4],
-                "yOffset" => $glyph[5],
-                "valid" => 1
-            ];
-        }
-
-        // Classic fixed-width font only: 5x8 column-major, no glyphs table.
-        // Empty stubs (U8g2 / make:font) must not invent classic offsets into
-        // an empty bitmap table — that produced "Undefined array key 415" for 'S'.
-        if ($this->isColumnMajor && $this->bitmaps !== []) {
-            return [
-                'bitmapOffset' => $character * 5,  // 5 bytes per char
-                'width' => 5,
-                'height' => 8,
-                'xAdvance' => 6,           // 5 + 1 spacing
-                'xOffset' => 0,
-                'yOffset' => 0,            // classic draws from top-left, not baseline
-                'valid' => 1,
-            ];
-        }
-
-        return [
-            'bitmapOffset' => 0,
-            'width' => 0,
-            'height' => 0,
-            'xAdvance' => 0,
-            'xOffset' => 0,
-            'yOffset' => 0,
-            'valid' => 0,
-        ];
+        return $this->reservedGlyph0() && count($this->glyphs) >= $range + 1 ? FontEncoding::LVGL : FontEncoding::ADAFRUIT;
     }
 
-    protected function resolveFontEncoding(): string
+    private function reservedGlyph0(): bool
     {
-        if (! is_null($this->resolvedFontEncoding)) {
-            return $this->resolvedFontEncoding;
-        }
+        $g = $this->glyphs[0] ?? null;
 
-        if ($this->fontEncoding === 'adafruit' || $this->fontEncoding === 'lvgl') {
-            $this->resolvedFontEncoding = $this->fontEncoding;
-
-            return $this->resolvedFontEncoding;
-        }
-
-        // Auto-detect: LVGL converted fonts in this project have a reserved
-        // all-zero glyph entry at index 0 and then glyphs for the real range.
-        $rangeLength = $this->last - $this->first + 1;
-        $hasReservedGlyph0 = $this->hasReservedGlyph0();
-        $hasExpectedGlyphCount = count($this->glyphs) >= ($rangeLength + 1);
-
-        if ($hasReservedGlyph0 && $hasExpectedGlyphCount) {
-            $this->resolvedFontEncoding = 'lvgl';
-
-            return $this->resolvedFontEncoding;
-        }
-
-        $this->resolvedFontEncoding = 'adafruit';
-
-        return $this->resolvedFontEncoding;
+        return is_array($g) && count($g) >= 6 && $g[0] === 0 && $g[1] === 0 && $g[2] === 0 && $g[3] === 0 && $g[4] === 0 && $g[5] === 0;
     }
 
-    protected function hasReservedGlyph0(): bool
+    /** Adafruit is baseline-relative. An LVGL face with only non-negative offsets measures from the line bottom. */
+    private function detectYOffsetMode(): YOffsetMode
     {
-        $glyph0 = $this->glyphs[0] ?? null;
-        if (! is_array($glyph0) || count($glyph0) < 6) {
-            return false;
+        if ($this->encoding() !== FontEncoding::LVGL) {
+            return YOffsetMode::RAW;
         }
-
-        return
-            $glyph0[0] === 0 &&
-            $glyph0[1] === 0 &&
-            $glyph0[2] === 0 &&
-            $glyph0[3] === 0 &&
-            $glyph0[4] === 0 &&
-            $glyph0[5] === 0;
-    }
-
-    protected function resolveYOffsetMode(): string
-    {
-        if (! is_null($this->resolvedYOffsetMode)) {
-            return $this->resolvedYOffsetMode;
-        }
-
-        if ($this->yOffsetMode === 'raw' || $this->yOffsetMode === 'lvgl_line') {
-            $this->resolvedYOffsetMode = $this->yOffsetMode;
-
-            return $this->resolvedYOffsetMode;
-        }
-
-        // Non-LVGL fonts use Adafruit-style raw yOffset semantics.
-        if ($this->resolveFontEncoding() !== 'lvgl') {
-            $this->resolvedYOffsetMode = 'raw';
-
-            return $this->resolvedYOffsetMode;
-        }
-
-        // Auto detect LVGL y-offset semantics:
-        // - Unscii-like converted fonts: all non-negative ofs_y -> line-space coords
-        // - Montserrat-like converted fonts: mixed/negative yOffset -> already usable raw
-        $start = 1; // LVGL mapped fonts in this project reserve glyph[0]
-        $end = min(count($this->glyphs), $start + 96);
-        $hasNegative = false;
-
-        for ($i = $start; $i < $end; $i++) {
-            $glyph = $this->glyphs[$i] ?? null;
-            if (! is_array($glyph) || count($glyph) < 6) {
-                continue;
-            }
-
-            if ($glyph[5] < 0) {
-                $hasNegative = true;
-                break;
+        $end = min(count($this->glyphs), 97);
+        for ($i = 1; $i < $end; $i++) {
+            $g = $this->glyphs[$i] ?? null;
+            if (is_array($g) && count($g) >= 6 && $g[5] < 0) {
+                return YOffsetMode::RAW;
             }
         }
 
-        $this->resolvedYOffsetMode = $hasNegative ? 'raw' : 'lvgl_line';
-
-        return $this->resolvedYOffsetMode;
+        return YOffsetMode::LINE;
     }
 }

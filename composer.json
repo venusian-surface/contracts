@@ -1,6 +1,6 @@
 {
-    "name": "tubes/contracts",
-    "description": "The Tubes Contracts component.",
+    "name": "surface/contracts",
+    "description": "The Surface contracts: interfaces and exceptions shared by every Surface component and engine package.",
     "license": "MIT",
     "authors": [
         {
@@ -8,18 +8,14 @@
             "email": "angel@projectsaturnstudios.com"
         }
     ],
-    "homepage": "https://scrapyard-io.projectsaturnstudios.com/ecosystem/scrapyard-io/tubes/0.7.x",
-    "support": {
-        "issues": "https://github.com/scrapyard-io/tubes/issues",
-        "source": "https://github.com/scrapyard-io/tubes"
-    },
     "require": {
-        "php": "^8.4|^8.5|^8.6"
+        "php": "^8.4|^8.5|^8.6",
+        "venusian-voyager/contracts": "^0.8.0"
     },
     "minimum-stability": "dev",
     "autoload": {
         "psr-4": {
-            "ScrapyardIO\\Tubes\\Contracts\\": ""
+            "Surface\\Contracts\\": ""
         }
     },
     "config": {
@@ -27,9 +23,7 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-master": "0.7.x-dev",
-            "dev-main": "0.7.x-dev",
-            "dev-0.7.x": "0.7.x-dev"
+            "dev-main": "0.8.x-dev"
         }
     }
 }
